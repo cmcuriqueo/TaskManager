@@ -122,99 +122,95 @@ fn file_icon(path: &str) -> Option<Vec<u8>> {
 
 #[cfg(not(windows))]
 fn file_icon(path: &str) -> Option<Vec<u8>> {
-    use image::io::Reader as ImageReader;
-    use image::imageops::FilterType;
+    // Use gdk-pixbuf to load and rasterize icons. This delegates icon theme resolution
+    // and SVG rendering to the system-installed gdk-pixbuf loaders (e.g. librsvg).
+    use gdk_pixbuf::Pixbuf;
     use std::path::Path;
 
-    fn load_image_to_rgba(p: &Path) -> Option<Vec<u8>> {
-        let img = ImageReader::open(p).ok()?.with_guessed_format().ok()?.decode().ok()?;
-        let img = img.resize_exact(ICON_PX as u32, ICON_PX as u32, FilterType::Lanczos3).to_rgba8();
-        Some(img.into_vec())
+    fn try_load_file(p: &Path) -> Option<Vec<u8>> {
+        // Load at requested size (keeps aspect ratio and scales)
+        let pb = Pixbuf::from_file_at_scale(p, ICON_PX as i32, ICON_PX as i32, true).ok()?;
+        pixbuf_to_rgba(&pb)
     }
 
     let p = Path::new(path);
-    // If it's an absolute/relative path and exists, try loading it directly.
+    // Try absolute/relative path first
     if (p.is_absolute() || p.components().count() > 1) && p.exists() {
-        if let Some(px) = load_image_to_rgba(p) {
+        if let Some(px) = try_load_file(p) {
             return Some(px);
         }
     }
 
-    // Otherwise treat 'path' as an icon name: try standard locations.
+    // Treat as icon name: search XDG data dirs and common locations
     let name = Path::new(path)
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(path);
 
-    let exts = ["png", "xpm", "ico", "jpg", "jpeg"];
     let mut candidates = Vec::new();
-
-    // ~/.local/share/icons/hicolor/*/apps/<name>.<ext>
-    if let Ok(home) = std::env::var("HOME") {
-        candidates.push(format!(
-            "{}/.local/share/icons/hicolor",
-            home
-        ));
+    if let Ok(xdg_data_home) = std::env::var("XDG_DATA_HOME") {
+        candidates.push(format!("{}/icons", xdg_data_home));
+        candidates.push(format!("{}/pixmaps", xdg_data_home));
+    } else if let Ok(home) = std::env::var("HOME") {
         candidates.push(format!("{}/.local/share/icons", home));
+        candidates.push(format!("{}/.local/share/pixmaps", home));
     }
 
-    // System-wide icon dirs
-    candidates.push("/usr/share/icons".to_string());
-    candidates.push("/usr/share/pixmaps".to_string());
+    if let Ok(xdg_data_dirs) = std::env::var("XDG_DATA_DIRS") {
+        for dir in xdg_data_dirs.split(':') {
+            candidates.push(format!("{}/icons", dir));
+            candidates.push(format!("{}/pixmaps", dir));
+        }
+    } else {
+        candidates.push("/usr/share/icons".to_string());
+        candidates.push("/usr/share/pixmaps".to_string());
+    }
+
+    let exts = ["png", "xpm", "ico", "svg", "jpg", "jpeg"];
 
     for base in candidates {
-        // try apps/<name>.<ext> in size subdirs
+        // try base/<name>.<ext>
+        for ext in &exts {
+            let cand = Path::new(&base).join(format!("{}.{}", name, ext));
+            if cand.exists() {
+                if let Some(px) = try_load_file(&cand) {
+                    return Some(px);
+                }
+            }
+        }
+
+        // try theme subdirs: base/*/apps/<name>.<ext>
         if let Ok(entries) = std::fs::read_dir(&base) {
             for entry in entries.filter_map(|e| e.ok()) {
                 let path = entry.path();
-                // If entry is a directory (theme or size), search inside
                 if path.is_dir() {
-                    // attempt common subpaths
                     let apps = path.join("apps");
                     if apps.exists() {
-                        for ext in exts {
+                        for ext in &exts {
                             let cand = apps.join(format!("{}.{}", name, ext));
                             if cand.exists() {
-                                if let Some(px) = load_image_to_rgba(&cand) {
+                                if let Some(px) = try_load_file(&cand) {
                                     return Some(px);
                                 }
                             }
                         }
                     }
-                    // try direct <name>.<ext> in the dir
-                    for ext in exts {
-                        let cand = path.join(format!("{}.{}", name, ext));
-                        if cand.exists() {
-                            if let Some(px) = load_image_to_rgba(&cand) {
-                                return Some(px);
-                            }
-                        }
-                    }
-                } else {
-                    // base itself could be /usr/share/pixmaps/<name>.<ext>
-                    for ext in exts {
-                        let cand = Path::new(&base).join(format!("{}.{}", name, ext));
-                        if cand.exists() {
-                            if let Some(px) = load_image_to_rgba(&cand) {
-                                return Some(px);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        // also try base/<name>.<ext> directly
-        for ext in exts {
-            let cand = Path::new(&base).join(format!("{}.{}", name, ext));
-            if cand.exists() {
-                if let Some(px) = load_image_to_rgba(&cand) {
-                    return Some(px);
                 }
             }
         }
     }
 
     None
+}
+
+#[cfg(not(windows))]
+fn stock_icon(kind: Stock) -> Option<Vec<u8>> {
+    // Map built-in stock icons to common freedesktop icon names and reuse file_icon.
+    let name = match kind {
+        Stock::App => "application-x-executable",
+        Stock::User => "user",
+    };
+    file_icon(name)
 }
 
 #[cfg(windows)]
@@ -235,16 +231,6 @@ fn stock_icon(kind: Stock) -> Option<Vec<u8>> {
         return None;
     }
     raster(info.hIcon)
-}
-
-#[cfg(not(windows))]
-fn stock_icon(kind: Stock) -> Option<Vec<u8>> {
-    // Map built-in stock icons to common freedesktop icon names and reuse file_icon.
-    let name = match kind {
-        Stock::App => "application-x-executable",
-        Stock::User => "user",
-    };
-    file_icon(name)
 }
 
 #[cfg(windows)]
@@ -395,4 +381,34 @@ fn bgra_to_rgba(pixels: &[u8]) -> Vec<u8> {
         }
     }
     rgba
+}
+
+fn pixbuf_to_rgba(pb: &gdk_pixbuf::Pixbuf) -> Option<Vec<u8>> {
+    // Convert Pixbuf pixels (RGB or RGBA) into RGBA Vec<u8> row-major expected by egui
+    let width = pb.get_width();
+    let height = pb.get_height();
+    let n_channels = pb.get_n_channels();
+    let has_alpha = pb.get_has_alpha();
+    let rowstride = pb.get_rowstride() as usize;
+    let pixels = pb.get_pixels();
+    let mut out = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        let start = (y as usize) * rowstride;
+        for x in 0..width as usize {
+            let i = start + x * n_channels as usize;
+            let r = pixels[i];
+            let g = pixels[i + 1];
+            let b = pixels[i + 2];
+            let a = if has_alpha {
+                pixels[i + 3]
+            } else {
+                255
+            };
+            out.push(r);
+            out.push(g);
+            out.push(b);
+            out.push(a);
+        }
+    }
+    Some(out)
 }
