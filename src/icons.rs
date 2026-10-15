@@ -121,7 +121,99 @@ fn file_icon(path: &str) -> Option<Vec<u8>> {
 }
 
 #[cfg(not(windows))]
-fn file_icon(_path: &str) -> Option<Vec<u8>> {
+fn file_icon(path: &str) -> Option<Vec<u8>> {
+    use image::io::Reader as ImageReader;
+    use image::imageops::FilterType;
+    use std::path::Path;
+
+    fn load_image_to_rgba(p: &Path) -> Option<Vec<u8>> {
+        let img = ImageReader::open(p).ok()?.with_guessed_format().ok()?.decode().ok()?;
+        let img = img.resize_exact(ICON_PX as u32, ICON_PX as u32, FilterType::Lanczos3).to_rgba8();
+        Some(img.into_vec())
+    }
+
+    let p = Path::new(path);
+    // If it's an absolute/relative path and exists, try loading it directly.
+    if (p.is_absolute() || p.components().count() > 1) && p.exists() {
+        if let Some(px) = load_image_to_rgba(p) {
+            return Some(px);
+        }
+    }
+
+    // Otherwise treat 'path' as an icon name: try standard locations.
+    let name = Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(path);
+
+    let exts = ["png", "xpm", "ico", "jpg", "jpeg"];
+    let mut candidates = Vec::new();
+
+    // ~/.local/share/icons/hicolor/*/apps/<name>.<ext>
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(format!(
+            "{}/.local/share/icons/hicolor",
+            home
+        ));
+        candidates.push(format!("{}/.local/share/icons", home));
+    }
+
+    // System-wide icon dirs
+    candidates.push("/usr/share/icons".to_string());
+    candidates.push("/usr/share/pixmaps".to_string());
+
+    for base in candidates {
+        // try apps/<name>.<ext> in size subdirs
+        if let Ok(entries) = std::fs::read_dir(&base) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                // If entry is a directory (theme or size), search inside
+                if path.is_dir() {
+                    // attempt common subpaths
+                    let apps = path.join("apps");
+                    if apps.exists() {
+                        for ext in exts {
+                            let cand = apps.join(format!("{}.{}", name, ext));
+                            if cand.exists() {
+                                if let Some(px) = load_image_to_rgba(&cand) {
+                                    return Some(px);
+                                }
+                            }
+                        }
+                    }
+                    // try direct <name>.<ext> in the dir
+                    for ext in exts {
+                        let cand = path.join(format!("{}.{}", name, ext));
+                        if cand.exists() {
+                            if let Some(px) = load_image_to_rgba(&cand) {
+                                return Some(px);
+                            }
+                        }
+                    }
+                } else {
+                    // base itself could be /usr/share/pixmaps/<name>.<ext>
+                    for ext in exts {
+                        let cand = Path::new(&base).join(format!("{}.{}", name, ext));
+                        if cand.exists() {
+                            if let Some(px) = load_image_to_rgba(&cand) {
+                                return Some(px);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // also try base/<name>.<ext> directly
+        for ext in exts {
+            let cand = Path::new(&base).join(format!("{}.{}", name, ext));
+            if cand.exists() {
+                if let Some(px) = load_image_to_rgba(&cand) {
+                    return Some(px);
+                }
+            }
+        }
+    }
+
     None
 }
 
@@ -146,8 +238,13 @@ fn stock_icon(kind: Stock) -> Option<Vec<u8>> {
 }
 
 #[cfg(not(windows))]
-fn stock_icon(_kind: Stock) -> Option<Vec<u8>> {
-    None
+fn stock_icon(kind: Stock) -> Option<Vec<u8>> {
+    // Map built-in stock icons to common freedesktop icon names and reuse file_icon.
+    let name = match kind {
+        Stock::App => "application-x-executable",
+        Stock::User => "user",
+    };
+    file_icon(name)
 }
 
 #[cfg(windows)]
