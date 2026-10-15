@@ -7,6 +7,7 @@ use eframe::egui::{
     Frame, Layout, Margin, Pos2, Rect, RichText, Sense, Shape, Stroke, TextEdit, pos2, vec2,
 };
 
+use crate::icons::IconCache;
 use crate::monitor::{ProcessRow, Snapshot, SystemMonitor};
 use crate::startup::StartupRow;
 
@@ -184,6 +185,7 @@ struct TaskApp {
     run_text: String,
     startup: Vec<StartupRow>,
     startup_at: Instant,
+    icons: IconCache,
 }
 
 impl TaskApp {
@@ -213,6 +215,7 @@ impl TaskApp {
             run_text: String::new(),
             startup: crate::startup::sample_startup(),
             startup_at: Instant::now(),
+            icons: IconCache::new(),
         }
     }
 
@@ -421,6 +424,7 @@ impl TaskApp {
                     id: service.name.clone(),
                     pid: None,
                     service: Some(service.name.clone()),
+                    icon: format!("service:{}", service.name),
                     indent: 0.0,
                     expandable: false,
                     expanded: false,
@@ -468,6 +472,7 @@ impl TaskApp {
                 id: name.clone(),
                 pid: None,
                 service: None,
+                icon: String::new(),
                 indent: 0.0,
                 expandable: false,
                 expanded: false,
@@ -493,6 +498,7 @@ impl TaskApp {
                 id: row.name.clone(),
                 pid: None,
                 service: None,
+                icon: icon_of(&row.path),
                 indent: 0.0,
                 expandable: false,
                 expanded: false,
@@ -530,7 +536,8 @@ impl TaskApp {
 
     fn show_lines(&mut self, ui: &mut egui::Ui, heads: Vec<Head>, lines: Vec<Line>, sortable: bool) {
         let width = ui.available_width();
-        let event = paint_table(ui, width, &heads, &lines, self.sort, sortable);
+        let sort = self.sort;
+        let event = paint_table(ui, width, &heads, &lines, sort, sortable, &mut self.icons);
         match event {
             Some(Event::Sort(sort)) => self.sort = sort,
             Some(Event::Toggle(id)) => {
@@ -783,6 +790,7 @@ impl TaskApp {
 impl eframe::App for TaskApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.refresh_if_due();
+        self.icons.begin_frame();
         ctx.request_repaint_after(Duration::from_secs(1));
         egui::TopBottomPanel::top("search")
             .exact_height(48.0)
@@ -823,6 +831,9 @@ impl eframe::App for TaskApp {
         egui::CentralPanel::default()
             .frame(Frame::NONE.fill(BG).inner_margin(Margin::same(16)))
             .show(ctx, |ui| self.content(ui));
+        if self.icons.starved {
+            ctx.request_repaint();
+        }
     }
 }
 
@@ -925,6 +936,7 @@ struct Line {
     expandable: bool,
     expanded: bool,
     selected: bool,
+    icon: String,
     cells: Vec<Cell>,
 }
 
@@ -941,6 +953,7 @@ fn paint_table(
     lines: &[Line],
     sort: SortCol,
     sortable: bool,
+    icons: &mut IconCache,
 ) -> Option<Event> {
     let (header, response) = ui.allocate_exact_size(vec2(width, 48.0), Sense::click());
     let painter = ui.painter();
@@ -1006,7 +1019,7 @@ fn paint_table(
             ui.spacing_mut().item_spacing.y = 0.0;
             ui.set_width(width);
             for line in lines {
-                if let Some(next) = paint_line(ui, width, heads, line) {
+                if let Some(next) = paint_line(ui, width, heads, line, icons) {
                     event = Some(next);
                 }
             }
@@ -1014,7 +1027,13 @@ fn paint_table(
     event
 }
 
-fn paint_line(ui: &mut egui::Ui, width: f32, heads: &[Head], line: &Line) -> Option<Event> {
+fn paint_line(
+    ui: &mut egui::Ui,
+    width: f32,
+    heads: &[Head],
+    line: &Line,
+    icons: &mut IconCache,
+) -> Option<Event> {
     let (rect, response) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
     let painter = ui.painter();
     let rects = layout(rect, heads);
@@ -1045,11 +1064,26 @@ fn paint_line(ui: &mut egui::Ui, width: f32, heads: &[Head], line: &Line) -> Opt
         let text_pos = if cell.heat.is_some() {
             cell_rect.right_center() + vec2(-8.0, 0.0)
         } else if index == 0 {
-            let extra = if line.expandable { 18.0 } else { 4.0 };
-            pos2(
-                cell_rect.left() + 8.0 + line.indent + extra,
-                cell_rect.center().y,
-            )
+            let mut text_x = cell_rect.left() + 8.0 + line.indent;
+            if line.expandable {
+                text_x += 16.0;
+            }
+            if !line.icon.is_empty() {
+                let icon_rect = Rect::from_min_size(
+                    pos2(text_x, cell_rect.center().y - 8.0),
+                    vec2(16.0, 16.0),
+                );
+                if let Some(texture) = icons.texture(ui.ctx(), &line.icon) {
+                    painter.image(
+                        texture,
+                        icon_rect,
+                        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                }
+                text_x += 20.0;
+            }
+            pos2(text_x, cell_rect.center().y)
         } else {
             cell_rect.left_center() + vec2(8.0, 0.0)
         };
@@ -1241,6 +1275,7 @@ fn process_lines(
             members.len() > 1,
             open,
             selected_group,
+            &icon_of(&member_icon(&members)),
             &label,
             "",
             cpu,
@@ -1261,6 +1296,7 @@ fn process_lines(
                     false,
                     false,
                     Some(member.pid) == selected,
+                    &icon_of(&member.exe),
                     &pretty_name(&member.name),
                     &status_text(member.status),
                     member.cpu,
@@ -1331,6 +1367,7 @@ fn user_lines(
             true,
             open,
             visible.iter().any(|member| Some(member.pid) == selected) && !open,
+            "stock:user",
             &format!("{} ({})", group.label, visible.len()),
             "",
             cpu,
@@ -1347,6 +1384,7 @@ fn user_lines(
                     false,
                     false,
                     Some(member.pid) == selected,
+                    &icon_of(&member.exe),
                     &pretty_name(&member.name),
                     &status_text(member.status),
                     member.cpu,
@@ -1377,6 +1415,7 @@ fn detail_lines(
             id: process.pid.to_string(),
             pid: Some(process.pid),
             service: None,
+            icon: icon_of(&process.exe),
             indent: 0.0,
             expandable: false,
             expanded: false,
@@ -1423,6 +1462,7 @@ fn metric_line(
     expandable: bool,
     expanded: bool,
     selected: bool,
+    icon: &str,
     name: &str,
     status: &str,
     cpu: f32,
@@ -1438,6 +1478,7 @@ fn metric_line(
         expandable,
         expanded,
         selected,
+        icon: icon.to_string(),
         cells: vec![
             cell(name),
             cell(status),
@@ -1448,6 +1489,23 @@ fn metric_line(
             heat_cell("—".to_string(), 0.0),
         ],
     }
+}
+
+fn icon_of(path: &str) -> String {
+    if path.is_empty() {
+        "stock:app".to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+fn member_icon(members: &[ProcessRow]) -> String {
+    members
+        .iter()
+        .filter(|member| !member.exe.is_empty())
+        .max_by_key(|member| member.memory)
+        .map(|member| member.exe.clone())
+        .unwrap_or_default()
 }
 
 fn sort_members(rows: &mut [ProcessRow], sort: SortCol) {

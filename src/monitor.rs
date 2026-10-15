@@ -38,6 +38,7 @@ pub struct ProcessRow {
     pub disk_per_sec: u64,
     pub status: &'static str,
     pub user: String,
+    pub exe: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,6 +158,7 @@ impl SystemMonitor {
                 .with_cpu()
                 .with_disk_usage()
                 .with_memory()
+                .with_exe(UpdateKind::OnlyIfNotSet)
                 .with_user(UpdateKind::OnlyIfNotSet)
                 .without_tasks(),
         );
@@ -185,6 +187,10 @@ impl SystemMonitor {
                         .user_id()
                         .and_then(|id| self.users.get(id).cloned())
                         .unwrap_or_else(|| "-".to_string()),
+                    exe: process
+                        .exe()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_default(),
                 }
             })
             .collect();
@@ -445,6 +451,7 @@ mod tests {
             disk_per_sec: 0,
             status: "en ejecución",
             user: "user".to_string(),
+            exe: String::new(),
         }
     }
 

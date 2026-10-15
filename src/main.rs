@@ -1,6 +1,7 @@
 mod actions;
 mod gpu;
 mod gui;
+mod icons;
 mod monitor;
 mod services;
 mod sessions;
