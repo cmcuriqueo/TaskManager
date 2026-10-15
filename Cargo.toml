@@ -12,6 +12,8 @@ sysinfo = "0.36.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# Use gdk-pixbuf to delegate icon theme resolution and SVG rasterization to system loaders
+gdk-pixbuf = "0.15"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61.3", features = [
